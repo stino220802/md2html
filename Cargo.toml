@@ -1,0 +1,10 @@
+[package]
+name = "markdown2html"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pulldown-cmark = "0.9"
+clap = { version = "4", features = ["derive"] }
+v_htmlescape = "0.15.8" 
+syntect = "5"
