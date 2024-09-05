@@ -5,6 +5,14 @@ use clap::Parser;
 use v_htmlescape::escape;
 use pulldown_cmark::HeadingLevel;
 
+use rfd::{FileDialog};
+
+use dialoguer::{Confirm};
+
+use egui::{CentralPanel, Context, RichText, ScrollArea, TextEdit, TextStyle, Vec2, Button};
+use eframe::{egui, run_native, NativeOptions, App};
+
+
 struct CustomClasses {
     heading: Option<String>,
     paragraph: Option<String>,
@@ -15,7 +23,7 @@ struct CustomClasses {
 struct Args {
 
     #[arg(short, long)]
-    input_file: String,
+    input_files: Vec<String>,
 
     #[arg(short, long)]
     output_file: Option<String>,
@@ -31,35 +39,235 @@ struct Args {
     verbose: bool,
 }
 
+struct MyApp {
+    markdown_input: String,
+    html_output: String,
+    args: Args, 
+}
+
+impl MyApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            markdown_input: String::new(),
+            html_output: String::new(),
+            args: Args::parse(),
+        }
+    }
+
+    fn convert_markdown(&mut self) {
+        self.html_output = convert_markdown_to_html(&self.markdown_input, &self.args)
+    }
+
+    fn save_to_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let output_file = if self.args.output_file.is_some() {
+            self.args.output_file.clone().unwrap() 
+        } else {
+            if let Some(file_path) = FileDialog::new()
+                .add_filter("HTML Files", &["html"])
+                .save_file()
+            {
+                file_path.to_str().unwrap().to_string()
+            } else {
+                println!("Save cancelled. Exiting.");
+                return Ok(());
+            }
+        };
+
+        if std::path::Path::new(&output_file).exists() {
+            if !Confirm::new()
+                .with_prompt(format!("File '{}' already exists. Overwrite?", output_file))
+                .interact()? 
+            {
+                println!("Overwrite cancelled. Exiting.");
+                return Ok(());
+            }
+        }
+
+        fs::write(output_file.clone(), self.html_output.clone())?; 
+        println!("Conversion complete! Output saved to: {}", output_file);
+        Ok(())
+    }
+}
+
+impl eframe::App for MyApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Markdown to HTML Converter");
+
+            ui.add_space(10.0);
+
+            ui.group(|ui| {
+                ui.label("Markdown Input:");
+                ui.add_space(5.0);
+                ui.add(TextEdit::multiline(&mut self.markdown_input)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(10)); 
+            });
+
+            ui.add_space(10.0);
+
+            
+            ui.horizontal(|ui| {
+                if ui.button("Convert").clicked() {
+                    self.convert_markdown();
+                }
+
+                if ui.button("Save to File").clicked() {
+                    if let Err(err) = self.save_to_file() {
+                        eprintln!("Error saving to file: {}", err);
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+
+            ui.separator();
+
+            ui.add_space(10.0);
+
+
+            ui.group(|ui| {
+                ui.label("HTML Output:");
+                ui.add_space(5.0); 
+                ui.add(TextEdit::multiline(&mut self.html_output)
+                    .font(TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(10));
+            });
+        });
+    }
+}
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::try_parse()?; 
+    let args = Args::parse();
+
+    if args.input_files.is_empty() {
+        let native_options = NativeOptions::default();
+        run_native(
+            "Markdown to HTML Converter",
+            native_options,
+            Box::new(|cc| {
+                Ok(Box::new(MyApp::new(cc)) as Box<dyn App>) 
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        for input_file in &args.input_files {
+            
+            let markdown_input = fs::read_to_string(input_file.clone())?;
+       
+            let markdown_input = fs::read_to_string(input_file.clone())?;
+            if args.verbose {
+                println!("Input file: {}", input_file);
+                if let Some(output_file) = &args.output_file {
+                    println!("Output file: {}", output_file);
+                } else {
+                    println!("Output to stdout");
+                }
+            }
+            let html_output = convert_markdown_to_html(&markdown_input, &args);
+
+            let output_file = if args.output_file.is_some() {
+                args.output_file.clone().unwrap() 
+            } else {
+                let file_stem = std::path::Path::new(input_file)
+                    .file_stem()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                format!("{}.html", file_stem)
+            };
+
+            if std::path::Path::new(&output_file).exists() {
+                if !Confirm::new()
+                    .with_prompt(format!("File '{}' already exists. Overwrite?", output_file))
+                    .interact()? 
+                {
+                    println!("Overwrite cancelled for {}. Skipping.", input_file);
+                    continue;
+                }
+            }
+
+            fs::write(output_file.clone(), html_output.clone())?; 
+
+            println!("Conversion complete! Output saved to: {}", output_file);
+        }
+    }
+
+    Ok(())
+}
+
+fn generate_toc(headings: &[(HeadingLevel, String, String)]) -> String {
+    let mut toc = String::from("<nav>\n<h2>Table of Contents</h2>\n<ul>\n");
+    let mut current_level = HeadingLevel::H1; 
+
+    for (level, id, content) in headings {
+        while *level > current_level {
+            toc.push_str("<ul>\n");
+            current_level = next_level(&current_level);
+        }
+        while *level < current_level {
+            toc.push_str("</ul>\n");
+            current_level = prev_level(&current_level);
+        }
+
+        toc.push_str(&format!(
+            "<li><a href=\"#{}\">{}</a></li>\n",
+            id,
+            escape(&content).to_string()
+        ));
+    }
+
+    while current_level > HeadingLevel::H1 {
+        toc.push_str("</ul>\n");
+        current_level = prev_level(&current_level);
+    }
+
+    toc.push_str("</ul>\n</nav>\n");
+    toc
+}
+
+fn next_level(level: &HeadingLevel) -> HeadingLevel {
+    match level {
+        HeadingLevel::H1 => HeadingLevel::H2,
+        HeadingLevel::H2 => HeadingLevel::H3,
+        HeadingLevel::H3 => HeadingLevel::H4,
+        HeadingLevel::H4 => HeadingLevel::H5,
+        HeadingLevel::H5 => HeadingLevel::H6,
+        HeadingLevel::H6 => HeadingLevel::H6, 
+    }
+}
+
+fn prev_level(level: &HeadingLevel) -> HeadingLevel {
+    match level {
+        HeadingLevel::H2 => HeadingLevel::H1,
+        HeadingLevel::H3 => HeadingLevel::H2,
+        HeadingLevel::H4 => HeadingLevel::H3,
+        HeadingLevel::H5 => HeadingLevel::H4,
+        HeadingLevel::H6 => HeadingLevel::H5,
+        HeadingLevel::H1 => HeadingLevel::H1, 
+    }
+}
+
+fn convert_markdown_to_html(markdown_input: &str, args: &Args) -> String {
     let custom_classes = CustomClasses {
-        heading: args.heading_class,
-        paragraph: args.paragraph_class,
-        
+        heading: args.heading_class.clone(),
+        paragraph: args.paragraph_class.clone(),
     };
 
-    let markdown_input = fs::read_to_string(args.input_file.clone())?;
-    if args.verbose {
-        println!("Input file: {}", args.input_file);
-        if let Some(output_file) = &args.output_file {
-            println!("Output file: {}", output_file);
-        } else {
-            println!("Output to stdout");
-        }
-        
-    }
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
-    let _parser = MarkdownParser::new_ext(&markdown_input, options); 
 
     let mut html_output = String::new();
     let mut list_depth = 0;
     let mut table_state = None;
     let mut list_stack = Vec::new();
-    let mut headings = Vec::new(); 
+    let mut headings = Vec::new();
     let mut is_heading = false;
+
     for event in MarkdownParser::new_ext(&markdown_input, options) {
         match event {
             Event::Start(tag) => {
@@ -218,66 +426,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {} 
         }
     }
+
     let toc = generate_toc(&headings[..]);
-
     html_output.insert_str(0, &toc);
-    match args.output_file {
-        Some(file_path) => fs::write(file_path, html_output.clone())?,
-        None => io::stdout().write_all(html_output.as_bytes())?,
-    }
 
-    
-    Ok(())
-}
-
-fn generate_toc(headings: &[(HeadingLevel, String, String)]) -> String {
-    let mut toc = String::from("<nav>\n<h2>Table of Contents</h2>\n<ul>\n");
-    let mut current_level = HeadingLevel::H1; 
-
-    for (level, id, content) in headings {
-        while *level > current_level {
-            toc.push_str("<ul>\n");
-            current_level = next_level(&current_level);
-        }
-        while *level < current_level {
-            toc.push_str("</ul>\n");
-            current_level = prev_level(&current_level);
-        }
-
-        toc.push_str(&format!(
-            "<li><a href=\"#{}\">{}</a></li>\n",
-            id,
-            escape(&content).to_string()
-        ));
-    }
-
-    while current_level > HeadingLevel::H1 {
-        toc.push_str("</ul>\n");
-        current_level = prev_level(&current_level);
-    }
-
-    toc.push_str("</ul>\n</nav>\n");
-    toc
-}
-
-fn next_level(level: &HeadingLevel) -> HeadingLevel {
-    match level {
-        HeadingLevel::H1 => HeadingLevel::H2,
-        HeadingLevel::H2 => HeadingLevel::H3,
-        HeadingLevel::H3 => HeadingLevel::H4,
-        HeadingLevel::H4 => HeadingLevel::H5,
-        HeadingLevel::H5 => HeadingLevel::H6,
-        HeadingLevel::H6 => HeadingLevel::H6, 
-    }
-}
-
-fn prev_level(level: &HeadingLevel) -> HeadingLevel {
-    match level {
-        HeadingLevel::H2 => HeadingLevel::H1,
-        HeadingLevel::H3 => HeadingLevel::H2,
-        HeadingLevel::H4 => HeadingLevel::H3,
-        HeadingLevel::H5 => HeadingLevel::H4,
-        HeadingLevel::H6 => HeadingLevel::H5,
-        HeadingLevel::H1 => HeadingLevel::H1, 
-    }
+    html_output 
 }
